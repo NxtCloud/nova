@@ -100,7 +100,7 @@ from nova.virt.libvirt import host
 from nova.virt.libvirt import imagebackend
 from nova.virt.libvirt import imagecache
 from nova.virt.libvirt import lvm
-from nova.virt.libvirt import rbd_utils
+from nova.virt.libvirt import rbd_utils, sheepdog_utils
 from nova.virt.libvirt import utils as libvirt_utils
 from nova.virt.libvirt import vif as libvirt_vif
 from nova.virt import netutils
@@ -891,6 +891,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 self._cleanup_lvm(instance)
             if CONF.libvirt.images_type == 'rbd':
                 self._cleanup_rbd(instance)
+            if CONF.libvirt.images_type == 'sheepdog':
+                self._cleanup_sheepdog(instance)
 
         if destroy_disks or (
                 migrate_data and migrate_data.get('is_shared_block_storage',
@@ -934,6 +936,13 @@ class LibvirtDriver(driver.ComputeDriver):
                 pool=CONF.libvirt.images_rbd_pool,
                 ceph_conf=CONF.libvirt.images_rbd_ceph_conf,
                 rbd_user=CONF.libvirt.rbd_user)
+
+    @staticmethod
+    def _get_sheepdog_driver():
+        return sheepdog_utils.SheepdogDriver()
+
+    def _cleanup_sheepdog(self, instance): 
+        LibvirtDriver._get_sheepdog_driver().cleanup_volumes(instance)
 
     def _cleanup_rbd(self, instance):
         LibvirtDriver._get_rbd_driver().cleanup_volumes(instance)

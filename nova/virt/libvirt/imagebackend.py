@@ -37,6 +37,7 @@ from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import dmcrypt
 from nova.virt.libvirt import lvm
 from nova.virt.libvirt import rbd_utils
+from nova.virt.libvirt import sheepdog_utils
 from nova.virt.libvirt import utils as libvirt_utils
 
 __imagebackend_opts = [
@@ -733,6 +734,125 @@ class Rbd(Image):
         raise exception.ImageUnacceptable(image_id=image_id_or_uri,
                                           reason=reason)
 
+class Sheepdog(Image):
+
+    SUPPORTS_CLONE = True
+
+    def __init__(self, instance=None, disk_name=None, path=None,
+                 snapshot_name=None):
+        super(Sheepdog, self).__init__("block", "raw", is_block_dev=True)
+        self.sheepdog_prefix = CONF.sheepdog.sheepdog_instance_prefix
+        self.driver = sheepdog_utils.SheepdogDriver()
+	self.vdi_name = self.sheepdog_prefix + instance.uuid ## get from instance 
+
+    def _sheepdog_source_name(self):
+        return ('%s:%s:%s' % (CONF.sheepdog.sheepdog_host,
+                                CONF.sheepdog.sheepdog_port,
+                                self.vdi_name))
+
+    def _sheepdog_path(self):
+        return ('%s:%s' % ('sheepdog', self._sheepdog_source_name()))
+
+    def libvirt_info(self, disk_bus, disk_dev, device_type, cache_mode,
+            extra_specs, hypervisor_version):
+        """Get `LibvirtConfigGuestDisk` filled for this image.
+        :disk_dev: Disk bus device name
+        :disk_bus: Disk bus type
+        :device_type: Device type for this image.
+        :cache_mode: Caching mode for this image
+        :extra_specs: Instance type extra specs dict.
+        """
+        info = vconfig.LibvirtConfigGuestDisk()
+
+        # see http://libvirt.org/formatdomain.html
+        info.device_type = device_type
+        info.driver_name = 'qemu'
+        # would like to use passed cache_mode argument, but that
+        # inherits from driver._supports_direct_io which checks the
+        # local filesystem rather than sheepdog.
+        info.driver_cache = 'writethrough'
+        info.driver_io = 'threads'
+        info.driver_ioeventfd = 'on'
+        info.driver_event_idx = 'off'
+
+        info.source_type = 'network'
+        info.source_protocol = 'sheepdog'
+        info.source_name = self._sheepdog_source_name()
+
+        info.target_bus = disk_bus
+        info.target_dev = disk_dev
+        return info
+
+    def check_image_exists(self):
+        return self.driver.exists(self.vdi_name)
+
+    def cache(self, fetch_func, filename, size=None, *args, **kwargs):
+        self.create_image(fetch_func, None, size, *args, **kwargs)
+
+    def _can_fallocate(self):
+        return False
+
+
+    def get_disk_size(self, vdi_name):
+        """Returns the size of the virtual disk in bytes.
+        """
+	return self.driver.size(vdi_name)
+
+    @staticmethod
+    def is_shared_block_storage():
+        """True if the backend puts images on a shared block storage."""
+        return True
+
+
+
+    def clone(self, context, image_id):
+	'''clone vdi from image vdi for instance
+        :image_id: image for creating instance 
+        '''
+	if self.driver.exists(image_id):
+
+	    LOG.debug('clone vdi for instance %',self.vdi_name )
+
+      	    self.driver.snapshot(image_id, self.vdi_name + "-tmp")
+            self.driver.clone(image_id, self.vdi_name + "-tmp", self.vdi_name)
+
+	    LOG.debug('clean snapshot %s',self.vdi_name + "-tmp")
+            self.driver.delete(image_id,self.vdi_name+"-tmp")
+	
+
+    def resize(self, vdi_name, size):
+        '''resize vdi size
+        :vdi_name: the vdi that should resize
+        :size: total size vdi need
+        ''' 
+        LOG.debug("Resizing %s to %s" % (vdi_name, size)) 
+        self.driver.resize(vdi_name, size)
+
+    def create_image(self, prepare_template, base, size, *args, **kwargs):
+        '''creating vdi for instance
+        '''
+	LOG.debug("Creating image")
+            
+	if not self.check_image_exists():
+            prepare_template(target=base, max_size=size, *args, **kwargs)
+        else:
+            self.verify_base_size(base, size)
+
+        # prepare_template() may have cloned the image into a new vdi
+        # image already instead of downloading it locally
+
+        if size and size > self.get_disk_size(self.vdi_name):
+            self.resize(self.vdi_name, size)
+
+    def shanpshot_create(self):
+        pass
+
+    def snapshot_extract(self):
+        pass
+
+    def snapshot_delete(self):
+        pass
+
 
 class Backend(object):
     def __init__(self, use_cow):
@@ -741,6 +861,7 @@ class Backend(object):
             'qcow2': Qcow2,
             'lvm': Lvm,
             'rbd': Rbd,
+            'sheepdog': Sheepdog,
             'default': Qcow2 if use_cow else Raw
         }
 
